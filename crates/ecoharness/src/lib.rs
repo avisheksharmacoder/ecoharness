@@ -3,7 +3,9 @@ pub mod evaluator;
 pub mod guardrails;
 pub mod mounter;
 pub mod ollama;
+pub mod plugins;
 pub mod scripts;
+pub mod subagents;
 pub mod trajectory;
 pub mod workspace;
 
@@ -21,7 +23,9 @@ pub use ollama::{
     LfmComposeResponse, LfmProposeResponse, LfmTaskResponse, ModelRole, OllamaConfig, OllamaDriver,
     OllamaModelInfo,
 };
+pub use plugins::{PluginPolicy, PluginRunner};
 pub use scripts::{ScriptExecutionOutput, ScriptRunner, ScriptToolManifest, ScriptToolSpec};
+pub use subagents::{SubagentDispatcher, SubagentManifest, SubagentSpec};
 pub use trajectory::{CompressedTrajectory, Trajectory, TrajectoryCompressor, TrajectoryStep};
 pub use workspace::{
     ExperienceEntry, HarnessComponent, HarnessSnapshot, HarnessWorkspace,
@@ -53,6 +57,12 @@ pub enum HarnessError {
 
     #[error("Script execution error for tool '{tool_name}': {reason}")]
     ScriptExecutionError { tool_name: String, reason: String },
+
+    #[error("Subagent error for '{name}': {reason}")]
+    SubagentError { name: String, reason: String },
+
+    #[error("Plugin error for '{name}': {reason}")]
+    PluginError { name: String, reason: String },
 
     #[error("Driver execution error: {0}")]
     DriverError(String),

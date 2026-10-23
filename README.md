@@ -14,11 +14,13 @@ This Cargo workspace is split into two strictly decoupled crates:
 
 | Crate | Path | Description |
 |---|---|---|
-| **`harness2`** | `crates/harness2` | Headless Rust SDK for CLI, server, or embedded agents. Zero GUI dependencies. Includes the 8-file `HarnessWorkspace`, `TrajectoryCompressor`, `OllamaDriver`, multi-turn `ScriptRunner`, `GuardrailEnforcer`, `JsonSchemaEvaluator`, and `HarnessEngine`. |
-| **`harness2-gui`** | `crates/harness2-gui` | A 2-pane desktop workbench built with `iced` (v0.13) and `lucide-icons` for interactive experimentation, live 8-file editing, file mounting, and visual **Plan Mode** probing. |
+| **`ecoharness`** | `crates/ecoharness` | Headless Rust SDK for CLI, server, or embedded agents. Zero GUI dependencies. Includes the 8-file `HarnessWorkspace`, `TrajectoryCompressor`, `OllamaDriver`, multi-turn `ScriptRunner`, `GuardrailEnforcer`, `SubagentDispatcher`, `PluginRunner`, `JsonSchemaEvaluator`, and `HarnessEngine`. |
+| **`ecoharness-gui`** | `crates/ecoharness-gui` | A 2-pane desktop workbench built with `iced` (v0.14) and `lucide-icons` for interactive experimentation, live 8-file multi-line editing, session persistence, temperature sliders, and visual **Plan Mode** live stage tracking. |
 
 > [!TIP]
-> **Working with AI Coding Agents?** Check the dedicated [aidocs/](file:///C:/RustProjects/harness2-rust/aidocs/README.md) directory for machine-readable architecture maps, non-negotiable invariants, and API cheatsheets.
+> **Documentation Portal:**
+> * For human engineers and deep implementation details, see [docs/README.md](file:///C:/RustProjects/harness2-rust/docs/README.md) and [docs/IMPLEMENTATION.md](file:///C:/RustProjects/harness2-rust/docs/IMPLEMENTATION.md).
+> * For AI Coding Agents, check the dedicated [aidocs/](file:///C:/RustProjects/harness2-rust/aidocs/README.md) directory for machine-readable architecture maps, non-negotiable invariants, and API cheatsheets.
 
 ---
 
@@ -49,34 +51,34 @@ ollama pull LiquidAI/lfm2.5-350m
 
 ### 2. Run the Full Workspace TDD Suite
 ```bash
-# Run all 29 deterministic unit tests (0 network sockets required)
+# Run all 36 deterministic unit tests (0 network sockets required)
 cargo test --workspace
 
 # Run the live Ollama LFM2.5-350M hardware smoke gate
-OLLAMA_MODEL="LiquidAI/lfm2.5-350m" cargo test -p harness2 -- --ignored
+OLLAMA_MODEL="LiquidAI/lfm2.5-350m" cargo test -p ecoharness -- --ignored
 ```
 
-### 3. Launch the 2-Pane Desktop Studio (`harness2-gui`)
+### 3. Launch the 2-Pane Desktop Studio (`ecoharness-gui`)
 ```bash
-cargo run -p harness2-gui
+cargo run -p ecoharness-gui
 ```
 
 ---
 
-## Embedding `harness2` in Your Own Rust Project
+## Embedding `ecoharness` in Your Own Rust Project
 
-Add `harness2` to your `Cargo.toml`:
+Add `ecoharness` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-harness2 = { path = "crates/harness2" }
+ecoharness = { path = "crates/ecoharness" }
 tokio = { version = "1.43", features = ["full"] }
 ```
 
 ### Minimal SDK Usage
 
 ```rust
-use harness2::{
+use ecoharness::{
     HarnessEngine, HarnessWorkspace, JsonFieldType, JsonSchemaEvaluator,
     OllamaConfig, OllamaDriver,
 };

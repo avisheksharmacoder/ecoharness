@@ -1362,5 +1362,240 @@ async fn test_ppc_loop_with_progress_emits_ordered_stage_events() {
     ));
 }
 
+// ============================================================================
+// PHASE 5 TDD SUITE (crates/harness2): SubagentDispatcher, PluginRunner & Cleanup
+// ============================================================================
+use crate::{PluginRunner, SubagentDispatcher};
+
+// ============================================================================
+// TEST 21: SubagentDispatcher Parses subagents.json & Executes Subagent Tool Call
+// ============================================================================
+#[tokio::test]
+async fn test_subagent_dispatcher_parses_manifest_and_executes_subagent_call() {
+    let server = MockServer::start().await;
+    let temp = TempDir::new().expect("tempdir");
+    let ws = HarnessWorkspace::init(temp.path()).expect("init ws");
+
+    let subagents_json = serde_json::json!({
+        "subagents": [
+            {
+                "name": "sql_expert",
+                "model": "qwen2.5-coder:1.5b",
+                "system_prompt": "SUBAGENT_SQL_SYSTEM_PROMPT: Return optimized SQL."
+            }
+        ]
+    })
+    .to_string();
+
+    ws.write_component(HarnessComponent::Subagents, &subagents_json)
+        .expect("write subagents.json");
+
+    let spec = SubagentDispatcher::resolve_subagent(&ws, "subagent:sql_expert")
+        .expect("resolve subagent")
+        .expect("sql_expert should exist");
+    assert_eq!(spec.model, "qwen2.5-coder:1.5b");
+
+    // 1. Mock the delegated subagent call to qwen2.5-coder:1.5b
+    let subagent_reply = serde_json::json!({
+        "model": "qwen2.5-coder:1.5b",
+        "message": {
+            "role": "assistant",
+            "content": "{\"sql\": \"SELECT id FROM users WHERE active = 1;\"}"
+        },
+        "done": true
+    });
+
+    Mock::given(method("POST"))
+        .and(path("/api/chat"))
+        .and(body_string_contains("qwen2.5-coder:1.5b"))
+        .and(body_string_contains("SUBAGENT_SQL_SYSTEM_PROMPT"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(subagent_reply))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+
+    // 2. Mock Turn 2 of the main Executor after receiving the subagent's output
+    let turn2_main_reply = serde_json::json!({
+        "model": "lfm2.5-350m",
+        "message": {
+            "role": "assistant",
+            "content": serde_json::json!({
+                "thought": "Subagent returned SQL query",
+                "tool_name": null,
+                "tool_input": null,
+                "tool_output": null,
+                "error": null,
+                "final_output": "SELECT id FROM users WHERE active = 1;",
+                "succeeded": true,
+                "score": 0.96
+            }).to_string()
+        },
+        "done": true
+    });
+
+    Mock::given(method("POST"))
+        .and(path("/api/chat"))
+        .and(body_string_contains("SELECT id FROM users WHERE active = 1;"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(turn2_main_reply))
+        .with_priority(2)
+        .mount(&server)
+        .await;
+
+    // 3. Mock Turn 1 of the main Executor delegating to `subagent:sql_expert`
+    let turn1_main_reply = serde_json::json!({
+        "model": "lfm2.5-350m",
+        "message": {
+            "role": "assistant",
+            "content": serde_json::json!({
+                "thought": "Delegating SQL generation to subagent:sql_expert",
+                "tool_name": "subagent:sql_expert",
+                "tool_input": "{\"table\": \"users\"}",
+                "tool_output": null,
+                "error": null,
+                "final_output": null,
+                "succeeded": false,
+                "score": 0.0
+            }).to_string()
+        },
+        "done": true
+    });
+
+    Mock::given(method("POST"))
+        .and(path("/api/chat"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(turn1_main_reply))
+        .with_priority(3)
+        .mount(&server)
+        .await;
+
+    let driver = OllamaDriver::new(OllamaConfig {
+        base_url: server.uri(),
+        ..Default::default()
+    })
+    .with_max_turns(2)
+    .with_subagents(true);
+
+    let traj = driver
+        .execute_task(&ws, "Write query for active users")
+        .await
+        .expect("execute_task with subagent delegation");
+
+    assert!(traj.succeeded);
+    assert_eq!(traj.steps.len(), 2);
+    assert!(
+        traj.steps[0]
+            .tool_output
+            .as_deref()
+            .unwrap_or("")
+            .contains("SELECT id FROM users"),
+        "Step 1 tool_output must contain the subagent's response"
+    );
+}
+
+// ============================================================================
+// TEST 22: PluginRunner Repairs 350M Trailing Commas, Strips <think> & Truncates
+// ============================================================================
+#[tokio::test]
+async fn test_plugin_runner_repairs_trailing_commas_and_truncates_prompts() {
+    let server = MockServer::start().await;
+    let temp = TempDir::new().expect("tempdir");
+    let ws = HarnessWorkspace::init(temp.path()).expect("init ws");
+
+    let plugins_md = "\
+# Plugins Manifest
+ENABLE_PLUGIN: repair_trailing_commas
+ENABLE_PLUGIN: strip_thinking_tags
+MAX_PROMPT_CHARS: 80
+";
+    ws.write_component(HarnessComponent::Plugins, plugins_md)
+        .expect("write plugins manifest");
+
+    // 1. Verify pre-prompt truncation
+    let long_prompt = "Extract user_id ".repeat(20);
+    let truncated =
+        PluginRunner::apply_pre_prompt(&ws, &long_prompt).expect("apply_pre_prompt");
+    assert!(
+        truncated.chars().count() <= 80,
+        "Expected pre-prompt plugin to truncate to <= 80 chars, got {}",
+        truncated.chars().count()
+    );
+
+    // 2. Verify post-response strips <think> tags and repairs trailing commas in JSON
+    let noisy_350m_output = r#"<think>Let me format the JSON response.</think>
+{
+  "thought": "Extracted user 99",
+  "tool_name": null,
+  "tool_input": null,
+  "tool_output": null,
+  "error": null,
+  "final_output": "{\"user_id\": 99}",
+  "succeeded": true,
+  "score": 0.92,
+}"#;
+
+    let repaired =
+        PluginRunner::apply_post_response(&ws, noisy_350m_output).expect("apply_post_response");
+    assert!(!repaired.contains("<think>"));
+    assert!(!repaired.contains("0.92,\n}"));
+
+    // 3. Verify OllamaDriver with `.with_plugins(true)` parses noisy 350M output end-to-end
+    let chat_envelope = serde_json::json!({
+        "model": "lfm2.5-350m",
+        "message": {
+            "role": "assistant",
+            "content": noisy_350m_output
+        },
+        "done": true
+    });
+
+    Mock::given(method("POST"))
+        .and(path("/api/chat"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(chat_envelope))
+        .mount(&server)
+        .await;
+
+    let driver = OllamaDriver::new(OllamaConfig {
+        base_url: server.uri(),
+        ..Default::default()
+    })
+    .with_plugins(true);
+
+    let traj = driver
+        .execute_task(&ws, "Extract user 99")
+        .await
+        .expect("driver with plugins should parse repaired JSON");
+
+    assert!(traj.succeeded);
+    assert_eq!(traj.final_output.as_deref(), Some("{\"user_id\": 99}"));
+}
+
+// ============================================================================
+// TEST 23: HarnessEngine Sandbox Cleanup Removes Ephemeral Probe Directories
+// ============================================================================
+#[tokio::test]
+async fn test_engine_with_cleanup_sandboxes_removes_probe_directories() {
+    let base_dir = TempDir::new().expect("base dir");
+    let probe_dir = TempDir::new().expect("probe dir");
+    let base_ws = HarnessWorkspace::init(base_dir.path()).expect("init base");
+
+    let engine = HarnessEngine::new(ScriptedMockDriver { both_regress: false }, 1000)
+        .with_cleanup_sandboxes(true);
+
+    let decision = engine
+        .run_propose_probe_compose(&base_ws, probe_dir.path(), "Extract user_id")
+        .await
+        .expect("PPC with sandbox cleanup");
+
+    assert!(decision.winning_trajectory.succeeded);
+    assert!(
+        !probe_dir.path().join("probe_invariant").exists(),
+        "probe_invariant directory must be cleaned up after PPC completes"
+    );
+    assert!(
+        !probe_dir.path().join("probe_domain").exists(),
+        "probe_domain directory must be cleaned up after PPC completes"
+    );
+}
+
+
 
 

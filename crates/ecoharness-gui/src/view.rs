@@ -3,12 +3,20 @@ use crate::state::{
 };
 use ecoharness::{HarnessComponent, ModelRole, MountTarget};
 use iced::widget::{
-    button, checkbox, column, container, row, rule, scrollable, text, text_editor, text_input,
-    toggler, Column, Row,
+    button, checkbox, column, container, row, rule, scrollable, slider, text,
+    text_editor, text_input, toggler, Column, Row,
 };
 use iced::{Alignment, Element, Font, Length};
 
 const LUCIDE_FONT: Font = Font::with_name("lucide");
+
+fn horizontal_rule<'a>(height: impl Into<iced::Pixels>) -> iced::widget::Rule<'a> {
+    rule::horizontal(height)
+}
+
+fn vertical_rule<'a>(width: impl Into<iced::Pixels>) -> iced::widget::Rule<'a> {
+    rule::vertical(width)
+}
 
 fn icon_badge(action: UiIcon) -> iced::widget::Text<'static> {
     let glyph = char::from(AppState::icon_for(action));
@@ -20,7 +28,7 @@ pub fn view(state: &AppState) -> Element<'_, Message> {
     let left_pane = render_left_pane(state);
     let right_pane = render_right_pane(state);
 
-    row![left_pane, rule::vertical(1), right_pane]
+    row![left_pane, vertical_rule(1), right_pane]
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
@@ -87,10 +95,10 @@ fn render_left_pane(state: &AppState) -> Element<'_, Message> {
     let left_column = column![
         chat_header,
         scrollable(session_list).height(Length::FillPortion(2)),
-        rule::horizontal(1),
+        horizontal_rule(1),
         ollama_header,
         scrollable(model_list).height(Length::FillPortion(2)),
-        rule::horizontal(1),
+        horizontal_rule(1),
         detail_pane,
     ]
     .spacing(10)
@@ -148,6 +156,7 @@ fn render_detail_subpane(state: &AppState) -> Element<'_, Message> {
 
             column![
                 header,
+                text(state.inspector_summary()).size(11),
                 row_top,
                 row_bottom,
                 editor_controls,
@@ -190,10 +199,30 @@ fn render_detail_subpane(state: &AppState) -> Element<'_, Message> {
             ]
             .spacing(6);
 
-            let json_toggle = checkbox(cfg.enforce_json_schema)
-                .label("Enforce Strict JSON Schema")
-                .on_toggle(Message::ToggleEnforceJsonSchema)
-                .size(14);
+            let temp_slider = row![
+                text(format!("Temp: {:.2}", cfg.temperature)).size(12),
+                slider(0.0..=2.0, cfg.temperature, Message::UpdateTemperature).step(0.05),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center);
+
+            let json_toggle = row![
+                checkbox(cfg.enforce_json_schema)
+                    .on_toggle(Message::ToggleEnforceJsonSchema)
+                    .size(13),
+                text("Enforce Strict JSON Schema").size(13),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center);
+
+            let script_toggle = row![
+                checkbox(state.script_execution_enabled)
+                    .on_toggle(Message::ToggleScriptExecution)
+                    .size(13),
+                text("Enable Multi-Turn Scripts, Subagents & Plugins").size(13),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center);
 
             column![
                 header,
@@ -205,7 +234,9 @@ fn render_detail_subpane(state: &AppState) -> Element<'_, Message> {
                 .size(12),
                 endpoint_input,
                 role_buttons,
+                temp_slider,
                 json_toggle,
+                script_toggle,
             ]
             .spacing(8)
             .height(Length::FillPortion(4))
@@ -219,7 +250,13 @@ fn render_right_pane(state: &AppState) -> Element<'_, Message> {
 
     // 1. Top Header Bar with Plan Mode Toggle
     let status_badge = match &state.execution_status {
-        ExecutionStatus::Idle => "Ready".to_string(),
+        ExecutionStatus::Idle => {
+            if state.ppc_stage_history.is_empty() {
+                "Ready".to_string()
+            } else {
+                format!("Ready (last PPC: {} stages)", state.ppc_stage_history.len())
+            }
+        }
         ExecutionStatus::RunningSinglePass => "Running Single-Pass Executor...".to_string(),
         ExecutionStatus::RunningPlanModePpc => {
             format!(
@@ -331,9 +368,9 @@ fn render_right_pane(state: &AppState) -> Element<'_, Message> {
 
     column![
         top_bar,
-        rule::horizontal(1),
+        horizontal_rule(1),
         scrollable(message_stream).height(Length::Fill),
-        rule::horizontal(1),
+        horizontal_rule(1),
         file_bar,
         prompt_bar,
     ]

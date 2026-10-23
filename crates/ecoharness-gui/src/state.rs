@@ -89,6 +89,7 @@ pub enum Message {
     UpdateOllamaEndpoint(String),
     UpdateTemperature(f32),
     ToggleEnforceJsonSchema(bool),
+    ToggleScriptExecution(bool),
 
     // --- Left Detail Sub-Pane: 8-File Harness Inspector & Multi-line Editor ---
     SelectHarnessComponent(HarnessComponent),
@@ -109,6 +110,7 @@ pub enum Message {
 
     // --- Async SDK Progress & Completion Callbacks ---
     PpcStageProgressed(PpcStageEvent),
+    ApplyLivePpcRun(Vec<PpcStageEvent>, Result<CompositionDecision, String>),
     SinglePassFinished(Result<Trajectory, String>),
     PlanModePpcFinished(Result<CompositionDecision, String>),
 }
@@ -131,6 +133,7 @@ pub struct AppState {
     pub component_editor_content: text_editor::Content,
     pub saved_snapshots: Vec<String>,
     pub experience_preview: String,
+    pub script_execution_enabled: bool,
     editor_select_all_pending: bool,
 
     // Right Pane: Chat, Add File & Plan Mode
@@ -185,6 +188,7 @@ impl AppState {
             component_editor_content,
             saved_snapshots: Vec::new(),
             experience_preview,
+            script_execution_enabled: false,
             editor_select_all_pending: false,
             prompt_input: String::new(),
             plan_mode_enabled: false,
@@ -193,6 +197,47 @@ impl AppState {
             execution_status: ExecutionStatus::Idle,
             ppc_stage_history: Vec::new(),
         })
+    }
+
+    /// Initializes `AppState`, automatically loads `<workspace_root>/sessions.json` if present,
+    /// and configures the `OllamaDriver` with multi-turn script, subagent, and plugin execution enabled.
+    pub fn new_with_startup_restore(
+        workspace_root: PathBuf,
+        probe_root: PathBuf,
+        config: OllamaConfig,
+    ) -> Result<Self, String> {
+        let mut state = Self::new(workspace_root, probe_root, config)?;
+        state.script_execution_enabled = true;
+        state.driver = state
+            .driver
+            .with_max_turns(3)
+            .with_script_execution(true)
+            .with_subagents(true)
+            .with_plugins(true);
+        state.load_sessions()?;
+        Ok(state)
+    }
+
+    /// Returns a formatted diagnostic summary of the Left Detail Sub-Pane (active file,
+    /// `EXPERIENCE.md` preview, temperature, and multi-turn script status).
+    pub fn inspector_summary(&self) -> String {
+        let scripts_flag = if self.script_execution_enabled {
+            "Scripts: ON"
+        } else {
+            "Scripts: OFF"
+        };
+        let exp_first_line = self
+            .experience_preview
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("No experience entries");
+        format!(
+            "Temp: {:.2} | {} | MaxTurns: {} | Exp: {}",
+            self.driver.config().temperature,
+            scripts_flag,
+            self.driver.max_turns(),
+            exp_first_line
+        )
     }
 
     fn sessions_file_path(&self) -> PathBuf {
@@ -381,6 +426,19 @@ impl AppState {
                 Task::none()
             }
 
+            Message::ToggleScriptExecution(enabled) => {
+                self.script_execution_enabled = enabled;
+                let turns = if enabled { 3 } else { 1 };
+                self.driver = self
+                    .driver
+                    .clone()
+                    .with_max_turns(turns)
+                    .with_script_execution(enabled)
+                    .with_subagents(enabled)
+                    .with_plugins(enabled);
+                Task::none()
+            }
+
             Message::SelectHarnessComponent(component) => {
                 self.detail_view = DetailPaneView::HarnessInspector {
                     session_id: self.active_session_id,
@@ -555,13 +613,21 @@ impl AppState {
                     let probe_root = self.probe_root.clone();
                     Task::perform(
                         async move {
-                            let engine = HarnessEngine::new(driver, 1200);
-                            engine
-                                .run_propose_probe_compose(&ws, &probe_root, &prompt)
+                            let engine =
+                                HarnessEngine::new(driver, 1200).with_cleanup_sandboxes(true);
+                            let mut stages = Vec::new();
+                            let res = engine
+                                .run_propose_probe_compose_with_progress(
+                                    &ws,
+                                    &probe_root,
+                                    &prompt,
+                                    |evt| stages.push(evt),
+                                )
                                 .await
-                                .map_err(|e| e.to_string())
+                                .map_err(|e| e.to_string());
+                            (stages, res)
                         },
-                        Message::PlanModePpcFinished,
+                        |(stages, res)| Message::ApplyLivePpcRun(stages, res),
                     )
                 } else {
                     self.execution_status = ExecutionStatus::RunningSinglePass;
@@ -587,6 +653,11 @@ impl AppState {
                     self.execution_status = ExecutionStatus::RunningPlanModePpc;
                 }
                 Task::none()
+            }
+
+            Message::ApplyLivePpcRun(stages, result) => {
+                self.ppc_stage_history = stages;
+                self.update(Message::PlanModePpcFinished(result))
             }
 
             Message::SinglePassFinished(result) => {

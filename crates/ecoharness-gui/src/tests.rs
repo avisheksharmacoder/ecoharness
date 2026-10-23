@@ -377,3 +377,123 @@ fn test_gui_snapshot_save_and_rollback_restores_inspector_buffer() {
         "# Stable Prompt v1"
     );
 }
+
+// ============================================================================
+// PHASE 5 TDD SUITE (crates/harness2-gui): Startup Restore, Script Toggle & Live PPC
+// ============================================================================
+
+// ============================================================================
+// TEST 11: Startup Restore Loads Persisted Sessions & Enables Multi-Turn Scripts
+// ============================================================================
+#[test]
+fn test_gui_startup_restore_loads_sessions_and_enables_multiturn_scripts() {
+    let (ws_dir, probe_dir, mut initial_app) = setup_test_app();
+
+    let _ = initial_app.update(Message::PromptInputChanged(
+        "Saved before app close".to_string(),
+    ));
+    let _ = initial_app.update(Message::SendPrompt);
+    initial_app.save_sessions().expect("save sessions");
+
+    let restored_app = AppState::new_with_startup_restore(
+        ws_dir.path().to_path_buf(),
+        probe_dir.path().to_path_buf(),
+        OllamaConfig::default(),
+    )
+    .expect("new_with_startup_restore");
+
+    assert_eq!(
+        restored_app.active_session().messages.len(),
+        1,
+        "new_with_startup_restore must auto-load sessions.json on launch"
+    );
+    assert_eq!(
+        restored_app.active_session().messages[0].content,
+        "Saved before app close"
+    );
+    assert!(restored_app.script_execution_enabled);
+    assert_eq!(restored_app.driver.max_turns(), 3);
+    assert!(restored_app.driver.script_execution_enabled());
+}
+
+// ============================================================================
+// TEST 12: GUI Toggles Multi-Turn ScriptRunner & Updates Temperature
+// ============================================================================
+#[test]
+fn test_gui_toggle_script_execution_and_temperature_updates_driver() {
+    let (_ws, _probe, mut app) = setup_test_app();
+
+    let _ = app.update(Message::ToggleScriptExecution(true));
+    assert!(app.script_execution_enabled);
+    assert!(app.driver.script_execution_enabled());
+    assert_eq!(app.driver.max_turns(), 3);
+
+    let _ = app.update(Message::UpdateTemperature(0.45));
+    assert!((app.driver.config().temperature - 0.45).abs() < f32::EPSILON);
+
+    let summary = app.inspector_summary();
+    assert!(
+        summary.contains("0.45") && summary.contains("Scripts: ON"),
+        "Inspector summary must report temperature and script execution status, got: {}",
+        summary
+    );
+}
+
+// ============================================================================
+// TEST 13: ApplyLivePpcRun Records All 5 Stage Events & Updates Inspector Summary
+// ============================================================================
+#[test]
+fn test_gui_live_ppc_batch_progress_populates_stage_history_and_experience() {
+    let (_ws, _probe, mut app) = setup_test_app();
+
+    let stages = vec![
+        PpcStageEvent::ReferenceStarted,
+        PpcStageEvent::ReferenceCompleted {
+            score: 0.25,
+            succeeded: false,
+        },
+        PpcStageEvent::CandidatesProposed {
+            invariant_diff_count: 1,
+            domain_diff_count: 1,
+        },
+        PpcStageEvent::ProbesCompleted {
+            invariant_score: 0.98,
+            domain_score: 0.40,
+        },
+        PpcStageEvent::Composed {
+            adopted_diff_count: 1,
+            winning_score: 0.98,
+        },
+    ];
+
+    let decision = CompositionDecision {
+        adopted_diffs: vec![ComponentDiff {
+            component: HarnessComponent::ToolGuidance,
+            updated_content: "# Patched v2 ToolGuidance".to_string(),
+            rationale: "Use integer amount_cents".to_string(),
+        }],
+        lesson_learned: "Normalize currency strings to integer cents.".to_string(),
+        winning_trajectory: Trajectory {
+            task_prompt: "Charge invoice".to_string(),
+            steps: vec![],
+            final_output: Some("{\"amount_cents\": 12550}".to_string()),
+            succeeded: true,
+            score: 0.98,
+        },
+    };
+
+    let _ = app.update(Message::ApplyLivePpcRun(stages, Ok(decision)));
+
+    assert_eq!(app.ppc_stage_history.len(), 5);
+    assert_eq!(app.execution_status, ExecutionStatus::Idle);
+    assert_eq!(
+        app.active_session()
+            .messages
+            .last()
+            .unwrap()
+            .lesson_learned
+            .as_deref(),
+        Some("Normalize currency strings to integer cents.")
+    );
+}
+

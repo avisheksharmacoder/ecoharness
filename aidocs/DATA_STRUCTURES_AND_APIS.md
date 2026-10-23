@@ -93,6 +93,16 @@ let evaluator = Arc::new(
 * Parses `scripts/manifest.md` for registered tools.
 * Executes tool program via `std::process::Command` with input serialized into `HARNESS_TOOL_INPUT`.
 
+### `SubagentDispatcher` (`ecoharness::subagents`)
+* Parses `subagents.json` into typed `SubagentConfig`s with `name`, `model`, `system_prompt`, and `allowed_tools`.
+* Dispatches `subagent:<name>`, `<name>`, or `call_subagent` invocations to specialized subagents.
+
+### `PluginRunner` (`ecoharness::plugins`)
+* Parses `plugins/manifest.md` for active middleware directives.
+* `remove_trailing_commas`: Cleans invalid trailing commas emitted by compact 350M models.
+* `repair_json`: Fences stripping, trailing comma repair, and unclosed brace balancing.
+* `apply_pre_prompt`: Enforces character budget constraints via `TokenBudgetGuard`.
+
 ---
 
 ## 4. File Routing (`ecoharness::mounter`)

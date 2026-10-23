@@ -3,6 +3,7 @@ use crate::workspace::{ExperienceEntry, HarnessComponent, HarnessWorkspace};
 use crate::HarnessError;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::fs;
 use std::path::Path;
 
 /// Harness² splits candidate proposals into two orthogonal axes.
@@ -94,6 +95,7 @@ pub trait ExecutionDriver: Send + Sync {
 pub struct HarnessEngine<D: ExecutionDriver> {
     driver: D,
     compressor_max_chars: usize,
+    cleanup_sandboxes: bool,
 }
 
 impl<D: ExecutionDriver> HarnessEngine<D> {
@@ -101,7 +103,29 @@ impl<D: ExecutionDriver> HarnessEngine<D> {
         Self {
             driver,
             compressor_max_chars,
+            cleanup_sandboxes: false,
         }
+    }
+
+    /// Configures whether `probe_invariant` and `probe_domain` sandbox directories
+    /// are automatically removed after `run_propose_probe_compose` finishes.
+    pub fn with_cleanup_sandboxes(mut self, cleanup: bool) -> Self {
+        self.cleanup_sandboxes = cleanup;
+        self
+    }
+
+    /// Removes ephemeral probe directories inside `probe_root`.
+    pub fn cleanup_probe_dirs(probe_root: &Path) -> Result<(), HarnessError> {
+        for sub in ["probe_invariant", "probe_domain"] {
+            let dir = probe_root.join(sub);
+            if dir.exists() {
+                fs::remove_dir_all(&dir).map_err(|source| HarnessError::Io {
+                    path: dir,
+                    source,
+                })?;
+            }
+        }
+        Ok(())
     }
 
     pub fn driver(&self) -> &D {
@@ -218,6 +242,11 @@ impl<D: ExecutionDriver> HarnessEngine<D> {
                 adopted_diff_count: 0,
                 winning_score: decision.winning_trajectory.score,
             });
+
+            if self.cleanup_sandboxes {
+                Self::cleanup_probe_dirs(probe_root)?;
+            }
+
             return Ok(decision);
         }
 
@@ -245,6 +274,10 @@ impl<D: ExecutionDriver> HarnessEngine<D> {
             adopted_diff_count: decision.adopted_diffs.len(),
             winning_score: decision.winning_trajectory.score,
         });
+
+        if self.cleanup_sandboxes {
+            Self::cleanup_probe_dirs(probe_root)?;
+        }
 
         Ok(decision)
     }

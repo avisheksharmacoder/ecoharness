@@ -2,10 +2,13 @@ use crate::engine::{
     CandidateKind, ComponentDiff, CompositionDecision, ExecutionDriver, HarnessPatch,
 };
 use crate::evaluator::TaskEvaluator;
+use crate::guardrails::GuardrailEnforcer;
 use crate::mounter::StagedContextFile;
+use crate::plugins::PluginRunner;
 use crate::scripts::ScriptRunner;
+use crate::subagents::SubagentDispatcher;
 use crate::trajectory::{CompressedTrajectory, Trajectory, TrajectoryStep};
-use crate::workspace::HarnessWorkspace;
+use crate::workspace::{HarnessComponent, HarnessWorkspace};
 use crate::HarnessError;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -131,6 +134,8 @@ pub struct OllamaDriver {
     staged_files: Arc<RwLock<Vec<StagedContextFile>>>,
     max_turns: usize,
     enable_script_execution: bool,
+    enable_subagents: bool,
+    enable_plugins: bool,
     evaluator: Option<Arc<dyn TaskEvaluator>>,
 }
 
@@ -142,8 +147,26 @@ impl OllamaDriver {
             staged_files: Arc::new(RwLock::new(Vec::new())),
             max_turns: 1,
             enable_script_execution: false,
+            enable_subagents: false,
+            enable_plugins: false,
             evaluator: None,
         }
+    }
+
+    pub fn max_turns(&self) -> usize {
+        self.max_turns
+    }
+
+    pub fn script_execution_enabled(&self) -> bool {
+        self.enable_script_execution
+    }
+
+    pub fn subagents_enabled(&self) -> bool {
+        self.enable_subagents
+    }
+
+    pub fn plugins_enabled(&self) -> bool {
+        self.enable_plugins
     }
 
     /// Configures the maximum number of ReAct tool-execution turns per task (`>= 1`).
@@ -156,6 +179,18 @@ impl OllamaDriver {
     /// gated by `GuardrailEnforcer`.
     pub fn with_script_execution(mut self, enabled: bool) -> Self {
         self.enable_script_execution = enabled;
+        self
+    }
+
+    /// Enables delegating `subagent:<name>` tool calls to models defined in `subagents.json`.
+    pub fn with_subagents(mut self, enabled: bool) -> Self {
+        self.enable_subagents = enabled;
+        self
+    }
+
+    /// Enables pre-prompt and post-response middleware defined in `plugins/manifest.md`.
+    pub fn with_plugins(mut self, enabled: bool) -> Self {
+        self.enable_plugins = enabled;
         self
     }
 
@@ -243,17 +278,31 @@ impl OllamaDriver {
         let snapshot = workspace.snapshot()?;
         let mut out = String::from("=== MOUNTED HARNESS² 8-COMPONENT STATE ===\n");
         for (component, content) in snapshot.files {
+            if component == HarnessComponent::Subagents {
+                if let Ok(manifest) = SubagentDispatcher::parse_manifest(&content) {
+                    let subagent_names: Vec<String> = manifest
+                        .subagents
+                        .iter()
+                        .map(|s| format!("subagent:{}", s.name))
+                        .collect();
+                    out.push_str(&format!(
+                        "\n--- [{:?}] ---\nAvailable subagent tools: {:?}\n",
+                        component, subagent_names
+                    ));
+                    continue;
+                }
+            }
             out.push_str(&format!("\n--- [{:?}] ---\n{}\n", component, content.trim()));
         }
         Ok(out)
     }
 
-    async fn send_chat_json<T: serde::de::DeserializeOwned>(
+    async fn send_raw_chat(
         &self,
         model: &str,
         system_content: String,
         user_content: String,
-    ) -> Result<T, HarnessError> {
+    ) -> Result<String, HarnessError> {
         let url = self.endpoint("/api/chat");
         let req_body = OllamaChatRequest {
             model: model.to_string(),
@@ -292,7 +341,26 @@ impl OllamaDriver {
             HarnessError::DriverError(format!("Malformed Ollama chat envelope: {}", e))
         })?;
 
-        let clean_json = Self::sanitize_json_payload(&envelope.message.content);
+        Ok(envelope.message.content)
+    }
+
+    async fn send_chat_json_with_workspace<T: serde::de::DeserializeOwned>(
+        &self,
+        workspace: Option<&HarnessWorkspace>,
+        model: &str,
+        system_content: String,
+        user_content: String,
+    ) -> Result<T, HarnessError> {
+        let raw_content = self
+            .send_raw_chat(model, system_content, user_content)
+            .await?;
+
+        let post_processed = match (self.enable_plugins, workspace) {
+            (true, Some(ws)) => PluginRunner::apply_post_response(ws, &raw_content)?,
+            _ => raw_content,
+        };
+
+        let clean_json = Self::sanitize_json_payload(&post_processed);
         serde_json::from_str::<T>(clean_json).map_err(|e| {
             HarnessError::DriverError(format!(
                 "Failed to parse LFM JSON contract ({}): raw='{}'",
@@ -301,13 +369,50 @@ impl OllamaDriver {
         })
     }
 
+    async fn send_chat_json<T: serde::de::DeserializeOwned>(
+        &self,
+        model: &str,
+        system_content: String,
+        user_content: String,
+    ) -> Result<T, HarnessError> {
+        self.send_chat_json_with_workspace(None, model, system_content, user_content)
+            .await
+    }
+
+    /// Dispatches a `subagent:<name>` call to the subagent's configured Ollama model and system prompt.
+    async fn execute_subagent_call(
+        &self,
+        workspace: &HarnessWorkspace,
+        tool_name: &str,
+        tool_input: &str,
+    ) -> Result<Option<String>, HarnessError> {
+        GuardrailEnforcer::validate_tool_call(workspace, tool_name, tool_input)?;
+
+        let spec = match SubagentDispatcher::resolve_subagent(workspace, tool_name)? {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+
+        let reply = self
+            .send_raw_chat(&spec.model, spec.system_prompt, tool_input.to_string())
+            .await?;
+
+        Ok(Some(reply))
+    }
+
     /// Executes a multi-turn ReAct loop using `GuardrailEnforcer`, `ScriptRunner`,
-    /// and optional `TaskEvaluator`.
+    /// `SubagentDispatcher`, `PluginRunner`, and optional `TaskEvaluator`.
     async fn execute_multiturn_react(
         &self,
         workspace: &HarnessWorkspace,
         task_prompt: &str,
     ) -> Result<Trajectory, HarnessError> {
+        let effective_prompt = if self.enable_plugins {
+            PluginRunner::apply_pre_prompt(workspace, task_prompt)?
+        } else {
+            task_prompt.to_string()
+        };
+
         let system_prompt = Self::build_harness_system_prompt(workspace)?;
         let attached_files = self.staged_context_files();
 
@@ -317,7 +422,7 @@ impl OllamaDriver {
         let mut score = 0.0f32;
 
         for turn in 1..=self.max_turns {
-            let mut user_payload = format!("TASK: {}\n", task_prompt);
+            let mut user_payload = format!("TASK: {}\n", effective_prompt);
 
             if !attached_files.is_empty() {
                 user_payload.push_str("\n=== ATTACHED CONTEXT FILES ===\n");
@@ -349,7 +454,12 @@ impl OllamaDriver {
             );
 
             let parsed: LfmTaskResponse = self
-                .send_chat_json(&self.config.executor_model, system_prompt.clone(), user_payload)
+                .send_chat_json_with_workspace(
+                    Some(workspace),
+                    &self.config.executor_model,
+                    system_prompt.clone(),
+                    user_payload,
+                )
                 .await?;
 
             final_output = parsed.final_output.clone();
@@ -360,30 +470,53 @@ impl OllamaDriver {
                 if !tool_name.trim().is_empty() {
                     let input_str = parsed.tool_input.as_deref().unwrap_or("{}");
 
-                    let (tool_output, step_error) = if self.enable_script_execution {
-                        match ScriptRunner::execute_tool(workspace, tool_name, input_str).await {
-                            Ok(exec) if exec.exit_code == 0 => (Some(exec.stdout), None),
-                            Ok(exec) => {
-                                succeeded = false;
-                                let out = if exec.stdout.is_empty() {
-                                    None
-                                } else {
-                                    Some(exec.stdout)
-                                };
-                                let err_msg = format!(
-                                    "Tool '{}' exited with code {}: {}",
-                                    tool_name, exec.exit_code, exec.stderr
-                                );
-                                (out, Some(err_msg))
+                    let (tool_output, step_error) =
+                        if self.enable_subagents && tool_name.starts_with("subagent:") {
+                            match self
+                                .execute_subagent_call(workspace, tool_name, input_str)
+                                .await
+                            {
+                                Ok(Some(sub_out)) => (Some(sub_out), None),
+                                Ok(None) => {
+                                    succeeded = false;
+                                    (
+                                        None,
+                                        Some(format!(
+                                            "Subagent '{}' not found in subagents.json",
+                                            tool_name
+                                        )),
+                                    )
+                                }
+                                Err(err) => {
+                                    succeeded = false;
+                                    (None, Some(err.to_string()))
+                                }
                             }
-                            Err(err) => {
-                                succeeded = false;
-                                (None, Some(err.to_string()))
+                        } else if self.enable_script_execution {
+                            match ScriptRunner::execute_tool(workspace, tool_name, input_str).await
+                            {
+                                Ok(exec) if exec.exit_code == 0 => (Some(exec.stdout), None),
+                                Ok(exec) => {
+                                    succeeded = false;
+                                    let out = if exec.stdout.is_empty() {
+                                        None
+                                    } else {
+                                        Some(exec.stdout)
+                                    };
+                                    let err_msg = format!(
+                                        "Tool '{}' exited with code {}: {}",
+                                        tool_name, exec.exit_code, exec.stderr
+                                    );
+                                    (out, Some(err_msg))
+                                }
+                                Err(err) => {
+                                    succeeded = false;
+                                    (None, Some(err.to_string()))
+                                }
                             }
-                        }
-                    } else {
-                        (parsed.tool_output.clone(), parsed.error.clone())
-                    };
+                        } else {
+                            (parsed.tool_output.clone(), parsed.error.clone())
+                        };
 
                     steps.push(TrajectoryStep {
                         turn,
@@ -443,7 +576,12 @@ impl ExecutionDriver for OllamaDriver {
         workspace: &HarnessWorkspace,
         task_prompt: &str,
     ) -> Result<Trajectory, HarnessError> {
-        if self.enable_script_execution || self.max_turns > 1 || self.evaluator.is_some() {
+        if self.enable_script_execution
+            || self.enable_subagents
+            || self.enable_plugins
+            || self.max_turns > 1
+            || self.evaluator.is_some()
+        {
             return self.execute_multiturn_react(workspace, task_prompt).await;
         }
 
@@ -512,7 +650,12 @@ impl ExecutionDriver for OllamaDriver {
         );
 
         let parsed: LfmProposeResponse = self
-            .send_chat_json(&self.config.editor_model, system_prompt, user_prompt)
+            .send_chat_json_with_workspace(
+                Some(workspace),
+                &self.config.editor_model,
+                system_prompt,
+                user_prompt,
+            )
             .await?;
 
         let invariant_patch = HarnessPatch {
@@ -549,7 +692,12 @@ impl ExecutionDriver for OllamaDriver {
         );
 
         let parsed: LfmComposeResponse = self
-            .send_chat_json(&self.config.editor_model, system_prompt, user_prompt)
+            .send_chat_json_with_workspace(
+                Some(workspace),
+                &self.config.editor_model,
+                system_prompt,
+                user_prompt,
+            )
             .await?;
 
         Ok(CompositionDecision {

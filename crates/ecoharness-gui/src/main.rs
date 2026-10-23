@@ -14,8 +14,9 @@ fn main() -> iced::Result {
             let base_dir = env::temp_dir().join("harness2_gui_workspace");
             let probe_dir = env::temp_dir().join("harness2_gui_probes");
 
-            let state = AppState::new(base_dir, probe_dir, OllamaConfig::default())
-                .expect("Failed to initialize Harness² workspace");
+            let state =
+                AppState::new_with_startup_restore(base_dir, probe_dir, OllamaConfig::default())
+                    .expect("Failed to initialize Harness² workspace");
             (state, iced::Task::done(Message::RefreshOllamaModels))
         },
         AppState::update,
