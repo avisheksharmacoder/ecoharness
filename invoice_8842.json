@@ -1,0 +1,7 @@
+{
+  "webhook_event": "invoice.created",
+  "customer_ref": "CUST-8842",
+  "total_display": "$125.50",
+  "curr": "usd",
+  "tax_included": true
+}

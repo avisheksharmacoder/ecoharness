@@ -1,0 +1,28 @@
+# Rust build artifacts
+/target/
+target/
+**/*.rs.bk
+*.pdb
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Runtime & local session state
+sessions.json
+.history/
+tmp_*
+*.log
+
+# OS & Windows specific
+powershell.cmd
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDEs & Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
