@@ -14,6 +14,7 @@ harness2-rust/
 ├── Cargo.lock
 ├── docs/
 │   ├── README.md               # Documentation portal & index
+│   ├── HARNESS_SPECIFICATION.md# Harness file authoring & format specification
 │   ├── IMPLEMENTATION.md       # Deep-dive architecture & implementation guide
 │   ├── FEATURES.md             # System feature catalog (this file)
 │   └── PLANS.md                # System architectural roadmap & verification status

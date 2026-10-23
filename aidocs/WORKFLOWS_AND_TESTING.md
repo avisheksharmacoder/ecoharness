@@ -7,7 +7,7 @@ Essential commands, testing practices, and patterns for modifying `harness2-rust
 ## 1. Quick CLI Commands
 
 ### Run Full Test Suite
-Runs all 30 deterministic unit and integration tests (0 network sockets required):
+Runs all 36 deterministic unit and integration tests (0 network sockets required):
 ```bash
 cargo test --workspace
 ```

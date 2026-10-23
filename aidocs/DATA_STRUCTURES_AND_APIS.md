@@ -94,14 +94,14 @@ let evaluator = Arc::new(
 * Executes tool program via `std::process::Command` with input serialized into `HARNESS_TOOL_INPUT`.
 
 ### `SubagentDispatcher` (`ecoharness::subagents`)
-* Parses `subagents.json` into typed `SubagentConfig`s with `name`, `model`, `system_prompt`, and `allowed_tools`.
-* Dispatches `subagent:<name>`, `<name>`, or `call_subagent` invocations to specialized subagents.
+* Parses `subagents.json` into typed `SubagentManifest` containing `Vec<SubagentSpec>` (`name`, `model`, `system_prompt`).
+* `resolve_subagent(ws, tool_name)` resolves `subagent:<name>` calls and dispatches to isolated subagent model with private system prompt.
+* Maintains strict prompt isolation so private subagent instructions never leak into the parent executor's prompt context.
 
 ### `PluginRunner` (`ecoharness::plugins`)
-* Parses `plugins/manifest.md` for active middleware directives.
-* `remove_trailing_commas`: Cleans invalid trailing commas emitted by compact 350M models.
-* `repair_json`: Fences stripping, trailing comma repair, and unclosed brace balancing.
-* `apply_pre_prompt`: Enforces character budget constraints via `TokenBudgetGuard`.
+* Parses `plugins/manifest.md` for active middleware directives (`ENABLE_PLUGIN: repair_trailing_commas`, `ENABLE_PLUGIN: strip_thinking_tags`, `MAX_PROMPT_CHARS: <usize>`).
+* `apply_pre_prompt`: Enforces character budget constraints before tokenization.
+* `apply_post_response`: Strips reasoning `<think>...</think>` tags and repairs invalid trailing commas (`,}` and `,]`) outside string literals.
 
 ---
 

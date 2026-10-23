@@ -8,6 +8,7 @@ Welcome to the comprehensive technical documentation for **EcoHarness** (`harnes
 
 | Document | Description | Target Audience |
 | :--- | :--- | :--- |
+| **[docs/HARNESS_SPECIFICATION.md](file:///C:/RustProjects/harness2-rust/docs/HARNESS_SPECIFICATION.md)** | **Harness Specification & Authoring Guide:** Exact file formats, syntax rules, schemas, and directives for all 8 canonical harness files. | Developers, Agent Authors |
 | **[docs/IMPLEMENTATION.md](file:///C:/RustProjects/harness2-rust/docs/IMPLEMENTATION.md)** | **Deep Dive Implementation Guide:** Complete architectural details of how all new features are implemented, including `SubagentDispatcher`, `PluginRunner`, sandbox cleanup, startup restoration, and GUI widgets. | Developers, Architects, Contributors |
 | **[docs/FEATURES.md](file:///C:/RustProjects/harness2-rust/docs/FEATURES.md)** | **System Feature Matrix:** Full inventory of all 8 harness components, SDK APIs, GUI capabilities, and 36-test verification matrix. | Users, Integrators, Evaluators |
 | **[docs/PLANS.md](file:///C:/RustProjects/harness2-rust/docs/PLANS.md)** | **Roadmap & Phase Status:** Chronological record of Phase 1 through Phase 5 Green milestones and test status. | Engineering Management, Reviewers |
