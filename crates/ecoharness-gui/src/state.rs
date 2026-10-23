@@ -83,6 +83,7 @@ pub enum Message {
     SelectChatSession(usize),
     CreateNewChatSession,
     SelectOllamaModel(String),
+    SelectActiveModel(String),
     RefreshOllamaModels,
     OllamaModelsLoaded(Result<Vec<OllamaModelInfo>, String>),
     AssignModelRole(String, ModelRole),
@@ -240,6 +241,12 @@ impl AppState {
         )
     }
 
+    /// Real-time subscription polling Ollama every 3 seconds for discovered models.
+    pub fn subscription(&self) -> iced::Subscription<Message> {
+        iced::time::every(std::time::Duration::from_secs(3))
+            .map(|_| Message::RefreshOllamaModels)
+    }
+
     fn sessions_file_path(&self) -> PathBuf {
         self.workspace.root().join(SESSIONS_FILENAME)
     }
@@ -367,6 +374,19 @@ impl AppState {
                 Task::none()
             }
 
+            Message::SelectActiveModel(model_name) => {
+                let mut cfg = self.driver.config().clone();
+                cfg.executor_model = model_name.clone();
+                cfg.editor_model = model_name.clone();
+                self.driver.set_config(cfg);
+                self.selected_ollama_model = Some(model_name.clone());
+                self.detail_view = DetailPaneView::OllamaModelDetail {
+                    model_name,
+                    assigned_role: ModelRole::Both,
+                };
+                Task::none()
+            }
+
             Message::RefreshOllamaModels => {
                 let driver = self.driver.clone();
                 Task::perform(
@@ -378,10 +398,28 @@ impl AppState {
             Message::OllamaModelsLoaded(result) => {
                 match result {
                     Ok(models) => {
+                        let has_current_executor = models.iter().any(|m| {
+                            m.name == self.driver.config().executor_model
+                                || m.name.starts_with(&self.driver.config().executor_model)
+                        });
+                        if !has_current_executor && !models.is_empty() {
+                            let first_name = models[0].name.clone();
+                            let mut cfg = self.driver.config().clone();
+                            cfg.executor_model = first_name.clone();
+                            cfg.editor_model = first_name.clone();
+                            self.driver.set_config(cfg);
+                            self.selected_ollama_model = Some(first_name);
+                        }
                         self.ollama_models = models;
                     }
                     Err(err) => {
-                        self.execution_status = ExecutionStatus::Error(err);
+                        if self.ollama_models.is_empty() && matches!(self.execution_status, ExecutionStatus::Idle) {
+                            // Don't disturb chat view with polling errors if already idle
+                        } else if !self.ollama_models.is_empty() {
+                            // Transient error during periodic polling, preserve existing models
+                        } else {
+                            self.execution_status = ExecutionStatus::Error(err);
+                        }
                     }
                 }
                 Task::none()

@@ -3,7 +3,7 @@ use crate::state::{
 };
 use ecoharness::{HarnessComponent, ModelRole, MountTarget};
 use iced::widget::{
-    button, checkbox, column, container, row, rule, scrollable, slider, text,
+    button, checkbox, column, container, pick_list, row, rule, scrollable, slider, text,
     text_editor, text_input, toggler, Column, Row,
 };
 use iced::{Alignment, Element, Font, Length};
@@ -71,21 +71,31 @@ fn render_left_pane(state: &AppState) -> Element<'_, Message> {
     let mut model_list = Column::new().spacing(4);
     if state.ollama_models.is_empty() {
         model_list = model_list.push(
-            text("No models loaded yet (default: lfm2.5-350m)").size(12),
+            text("No models loaded yet (click Sync or check Ollama)").size(12),
         );
     } else {
         for model in &state.ollama_models {
+            let is_active = state.driver.config().executor_model == model.name
+                || state.driver.config().editor_model == model.name;
             let is_selected = state.selected_ollama_model.as_deref() == Some(model.name.as_str());
-            let label = if is_selected {
+            let label = if is_active {
+                format!("★ {}", model.name)
+            } else if is_selected {
                 format!("▸ {}", model.name)
             } else {
                 format!("  {}", model.name)
             };
-            model_list = model_list.push(
+            let item_row = row![
                 button(text(label).size(13))
                     .width(Length::Fill)
                     .on_press(Message::SelectOllamaModel(model.name.clone())),
-            );
+                button(text(if is_active { "Active" } else { "Use" }).size(11))
+                    .on_press(Message::SelectActiveModel(model.name.clone())),
+            ]
+            .spacing(4)
+            .align_y(Alignment::Center);
+
+            model_list = model_list.push(item_row);
         }
     }
 
@@ -201,7 +211,7 @@ fn render_detail_subpane(state: &AppState) -> Element<'_, Message> {
 
             let temp_slider = row![
                 text(format!("Temp: {:.2}", cfg.temperature)).size(12),
-                slider(0.0..=2.0, cfg.temperature, Message::UpdateTemperature).step(0.05),
+                slider(0.0..=2.0, cfg.temperature, Message::UpdateTemperature).step(0.05_f32),
             ]
             .spacing(8)
             .align_y(Alignment::Center);
@@ -267,12 +277,35 @@ fn render_right_pane(state: &AppState) -> Element<'_, Message> {
         ExecutionStatus::Error(err) => format!("Error: {}", err),
     };
 
+    let model_names: Vec<String> = state
+        .ollama_models
+        .iter()
+        .map(|m| m.name.clone())
+        .collect();
+
+    let current_selected = if model_names.contains(&cfg.executor_model) {
+        Some(cfg.executor_model.clone())
+    } else {
+        model_names.first().cloned()
+    };
+
+    let model_picker: Element<'_, Message> = if !model_names.is_empty() {
+        row![
+            text("Model:").size(13),
+            pick_list(model_names, current_selected, Message::SelectActiveModel),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center)
+        .into()
+    } else {
+        text(format!("Model: {} (waiting for Ollama)", cfg.executor_model))
+            .size(13)
+            .into()
+    };
+
     let top_bar = row![
-        text(format!(
-            "Executor: {} | Editor: {} | Status: {}",
-            cfg.executor_model, cfg.editor_model, status_badge
-        ))
-        .size(13),
+        model_picker,
+        text(format!("Status: {}", status_badge)).size(13),
         icon_badge(UiIcon::PlanMode),
         toggler(state.plan_mode_enabled)
             .label("Plan Mode (Recursive PPC)")

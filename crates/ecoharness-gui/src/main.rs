@@ -22,6 +22,7 @@ fn main() -> iced::Result {
         AppState::update,
         view::view,
     )
+    .subscription(AppState::subscription)
     .title("Harness² Studio — Rust + Ollama")
     .font(lucide_icons::LUCIDE_FONT_BYTES)
     .run()

@@ -70,6 +70,18 @@ fn test_left_pane_switching_between_chat_and_ollama_updates_detail_pane() {
         }
     );
 
+    // Testing SelectActiveModel sets both executor and editor and updates detail view
+    let _ = app.update(Message::SelectActiveModel("lfm2.5-350m:latest".to_string()));
+    assert_eq!(app.driver.config().executor_model, "lfm2.5-350m:latest");
+    assert_eq!(app.driver.config().editor_model, "lfm2.5-350m:latest");
+    assert_eq!(
+        app.detail_view,
+        DetailPaneView::OllamaModelDetail {
+            model_name: "lfm2.5-350m:latest".to_string(),
+            assigned_role: ModelRole::Both,
+        }
+    );
+
     // Selecting a Chat session switches the Left Detail Sub-Pane back to the 8-File HarnessInspector
     let _ = app.update(Message::SelectChatSession(0));
     assert_eq!(

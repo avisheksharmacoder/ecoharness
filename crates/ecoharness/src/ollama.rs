@@ -35,12 +35,27 @@ pub struct OllamaConfig {
     pub enforce_json_schema: bool,
 }
 
+pub fn normalize_ollama_url(raw: &str) -> String {
+    let trimmed = raw.trim().trim_end_matches('/');
+    let with_scheme = if !trimmed.starts_with("http://") && !trimmed.starts_with("https://") {
+        format!("http://{}", trimmed)
+    } else {
+        trimmed.to_string()
+    };
+    with_scheme.replace("0.0.0.0", "localhost")
+}
+
 impl Default for OllamaConfig {
     fn default() -> Self {
+        let base_url = std::env::var("OLLAMA_BASE_URL")
+            .or_else(|_| std::env::var("OLLAMA_HOST"))
+            .unwrap_or_else(|_| "http://localhost:11434".to_string());
+        let base_url = normalize_ollama_url(&base_url);
+        let model = std::env::var("OLLAMA_MODEL").unwrap_or_else(|_| "lfm2.5-350m".to_string());
         Self {
-            base_url: "http://localhost:11434".to_string(),
-            executor_model: "lfm2.5-350m".to_string(),
-            editor_model: "lfm2.5-350m".to_string(),
+            base_url,
+            executor_model: model.clone(),
+            editor_model: model,
             temperature: 0.1,
             enforce_json_schema: true,
         }
@@ -220,9 +235,16 @@ impl OllamaDriver {
             .get(&url)
             .send()
             .await
-            .map_err(|e| HarnessError::DriverError(format!("GET {} failed: {}", url, e)))?
-            .error_for_status()
-            .map_err(|e| HarnessError::DriverError(format!("Status error from {}: {}", url, e)))?;
+            .map_err(|e| HarnessError::DriverError(format!("GET {} failed: {}", url, e)))?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(HarnessError::DriverError(format!(
+                "Status error from {}: HTTP {} - {}",
+                url, status, body
+            )));
+        }
 
         let envelope: OllamaTagsEnvelope = resp.json().await.map_err(|e| {
             HarnessError::DriverError(format!("Invalid JSON from /api/tags: {}", e))
@@ -333,9 +355,16 @@ impl OllamaDriver {
             .json(&req_body)
             .send()
             .await
-            .map_err(|e| HarnessError::DriverError(format!("POST {} failed: {}", url, e)))?
-            .error_for_status()
-            .map_err(|e| HarnessError::DriverError(format!("Status error from {}: {}", url, e)))?;
+            .map_err(|e| HarnessError::DriverError(format!("POST {} failed: {}", url, e)))?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(HarnessError::DriverError(format!(
+                "Status error from {}: HTTP {} - {}",
+                url, status, body
+            )));
+        }
 
         let envelope: OllamaChatResponseEnvelope = resp.json().await.map_err(|e| {
             HarnessError::DriverError(format!("Malformed Ollama chat envelope: {}", e))
